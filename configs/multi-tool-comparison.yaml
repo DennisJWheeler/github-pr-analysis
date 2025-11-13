@@ -1,0 +1,152 @@
+# Multi-Tool PR Improvement Comparison
+# Configuration for comparing multiple PR improvement tools
+
+project_name: "PR Tool Effectiveness Comparison"
+description: "Comprehensive analysis comparing multiple PR improvement tools"
+
+tools:
+  # AI Code Review Tools
+  - name: "coderabbit"
+    display_name: "CodeRabbit AI"
+    enabled: true
+    category: "ai_review"
+    usernames:
+      - "coderabbitai"
+      - "coderabbit"
+      - "coderabbit[bot]"
+    suggestion_patterns:
+      - "```suggestion"
+      - "suggestion:"
+      - "**Suggestion:**"
+    comment_patterns:
+      - "🤖"
+      - "AI Review"
+
+  - name: "copilot"
+    display_name: "GitHub Copilot"
+    enabled: true
+    category: "ai_assist"
+    usernames:
+      - "github-copilot[bot]"
+      - "copilot[bot]"
+    suggestion_patterns:
+      - "copilot suggests:"
+      - "auto-suggestion"
+    comment_patterns:
+      - "Copilot:"
+
+  # Static Analysis Tools
+  - name: "sonarqube"
+    display_name: "SonarQube"
+    enabled: true
+    category: "static_analysis"
+    usernames:
+      - "sonarqube[bot]"
+      - "sonar-cloud[bot]"
+      - "sonarcloud[bot]"
+    suggestion_patterns:
+      - "SonarQube:"
+      - "Code smell:"
+      - "Security hotspot:"
+      - "Bug:"
+    comment_patterns:
+      - "Quality Gate"
+      - "Coverage"
+      - "Maintainability"
+
+  - name: "qodana"
+    display_name: "JetBrains Qodana"
+    enabled: true
+    category: "static_analysis"
+    usernames:
+      - "qodana[bot]"
+      - "qodana-bot"
+    suggestion_patterns:
+      - "Qodana found:"
+      - "Code inspection:"
+    comment_patterns:
+      - "Quality report"
+
+  # Dependency Management
+  - name: "dependabot"
+    display_name: "Dependabot"
+    enabled: true
+    category: "dependency_management"
+    usernames:
+      - "dependabot[bot]"
+      - "dependabot"
+    suggestion_patterns: []
+    comment_patterns:
+      - "Bumps"
+      - "Updates"
+
+  - name: "renovate"
+    display_name: "Renovate"
+    enabled: true
+    category: "dependency_management"
+    usernames:
+      - "renovate[bot]"
+      - "renovatebot"
+    suggestion_patterns: []
+    comment_patterns:
+      - "This PR contains"
+      - "dependency update"
+
+metrics:
+  time_to_first_review: true
+  time_to_merge: true
+  draft_duration: true
+  review_cycles: true
+  first_pass_approval: true
+  human_vs_bot_reviews: true
+  tool_suggestions: true
+  tool_adoption: true
+  tool_comments: true
+  size_analysis: true
+  outlier_detection: true
+  classify_stale_prs: true
+  classify_large_prs: true
+  classify_bot_prs: true
+
+settings:
+  stale_days: 14
+  large_pr_lines: 800
+  outlier_days: 30
+  use_percentiles: true
+  outlier_method: "iqr"
+
+reporting:
+  csv_export: true
+  markdown_report: true
+  json_export: true
+  executive_summary: true
+  time_metrics: true
+  quality_metrics: true
+  tool_analysis: true
+  outlier_analysis: true
+  recommendations: true
+  baseline_comparison: true
+  multi_tool_comparison: true
+
+# Cross-tool comparison settings
+comparison:
+  categories:
+    - "ai_review"
+    - "static_analysis"
+    - "dependency_management"
+
+  metrics_by_category:
+    ai_review:
+      - "suggestion_adoption_rate"
+      - "time_to_first_review_improvement"
+      - "review_quality_score"
+
+    static_analysis:
+      - "issue_detection_rate"
+      - "false_positive_rate"
+      - "security_finding_rate"
+
+    dependency_management:
+      - "update_frequency"
+      - "merge_success_rate"
+      - "security_update_speed"

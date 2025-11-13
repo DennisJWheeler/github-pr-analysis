@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  github-pr-analysis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: github-pr-analysis
+    environment:
+      # GitHub token should be set in .env file or passed at runtime
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+    volumes:
+      # Mount output directory to persist reports
+      - ./output:/app/output
+      # Mount .env file if it exists
+      - ./.env:/app/.env:ro
+    working_dir: /app
+    # Override default command for interactive use
+    # Usage: docker-compose run github-pr-analysis analyze owner/repo
+    profiles:
+      - manual
+
+  # Development service for interactive analysis
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: github-pr-analysis-dev
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+    volumes:
+      - ./output:/app/output
+      - ./.env:/app/.env:ro
+      # Mount source for development (if needed)
+      - .:/app/src:ro
+    working_dir: /app
+    entrypoint: ["/bin/sh"]
+    stdin_open: true
+    tty: true
+    profiles:
+      - dev

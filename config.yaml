@@ -1,0 +1,151 @@
+# PR Tool Impact Assessment Configuration
+# Generic configuration for evaluating PR improvement tools
+
+# Tool definitions for analysis
+tools:
+  # AI Code Review Tools
+  - name: "coderabbit"
+    display_name: "CodeRabbit AI"
+    enabled: true
+    category: "ai_review"
+    usernames:
+      - "coderabbitai"
+      - "coderabbit"
+      - "coderabbit[bot]"
+    suggestion_patterns:
+      - "```suggestion"
+      - "suggestion:"
+      - "**Suggestion:**"
+    comment_patterns:
+      - "🤖"
+      - "AI Review"
+
+  - name: "copilot"
+    display_name: "GitHub Copilot"
+    enabled: false
+    category: "ai_assist"
+    usernames:
+      - "github-copilot[bot]"
+      - "copilot[bot]"
+    suggestion_patterns:
+      - "copilot suggests:"
+      - "auto-suggestion"
+    comment_patterns:
+      - "Copilot:"
+
+  - name: "sonarqube"
+    display_name: "SonarQube"
+    enabled: false
+    category: "static_analysis"
+    usernames:
+      - "sonarqube[bot]"
+      - "sonar-cloud[bot]"
+      - "sonarcloud[bot]"
+    suggestion_patterns:
+      - "SonarQube:"
+      - "Code smell:"
+      - "Security hotspot:"
+    comment_patterns:
+      - "Quality Gate"
+      - "Coverage"
+
+  # Other automation tools
+  - name: "renovate"
+    display_name: "Renovate"
+    enabled: false
+    category: "dependency_management"
+    usernames:
+      - "renovate[bot]"
+      - "renovatebot"
+    suggestion_patterns: []
+    comment_patterns:
+      - "This PR contains"
+      - "dependency update"
+
+  - name: "dependabot"
+    display_name: "Dependabot"
+    enabled: false
+    category: "dependency_management"
+    usernames:
+      - "dependabot[bot]"
+      - "dependabot"
+    suggestion_patterns: []
+    comment_patterns:
+      - "Bumps"
+      - "Updates"
+
+# Metric configuration
+metrics:
+  # Time-based metrics
+  time_to_first_review: true
+  time_to_merge: true
+  draft_duration: true
+
+  # Quality metrics
+  review_cycles: true
+  first_pass_approval: true
+  human_vs_bot_reviews: true
+
+  # Tool-specific metrics
+  tool_suggestions: true
+  tool_adoption: true
+  tool_comments: true
+
+  # Size and complexity
+  size_analysis: true
+  outlier_detection: true
+
+  # Classification flags
+  classify_stale_prs: true
+  classify_large_prs: true
+  classify_bot_prs: true
+
+# Analysis settings
+settings:
+  # Outlier detection thresholds
+  stale_days: 14          # PRs with no activity for X days
+  large_pr_lines: 800     # PRs with more than X lines changed
+  outlier_days: 30        # PRs open longer than X days
+
+  # Statistical settings
+  use_percentiles: true   # Use percentiles instead of means
+  outlier_method: "iqr"   # Outlier detection method (iqr, zscore)
+
+  # Rate limiting
+  api_delay_ms: 100       # Delay between API calls
+  max_retries: 3          # Max retries for failed API calls
+
+  # Users to ignore for timing calculations (bot reviews shouldn't count as "first review")
+  ignore_users_for_timing:
+    - "dependabot[bot]"
+    - "dependabot"
+    - "github-actions[bot]"
+    - "github-actions"
+    - "renovate[bot]"
+    - "renovate"
+    - "coderabbitai"
+    - "coderabbit[bot]"
+    - "coderabbit"
+    - "sonar-qube[bot]"
+    - "sonarcloud[bot]"
+    - "qodana[bot]"
+    - "jetbrains[bot]"
+
+# Report configuration
+reporting:
+  # Output formats
+  csv_export: true
+  markdown_report: true
+  json_export: false
+
+  # Report sections
+  executive_summary: true
+  time_metrics: true
+  quality_metrics: true
+  tool_analysis: true
+  outlier_analysis: true
+  recommendations: true
+
+  # Comparison features
+  baseline_comparison: true  # Compare against baseline period
+  multi_tool_comparison: true  # Compare multiple tools if enabled

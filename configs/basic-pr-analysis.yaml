@@ -1,0 +1,78 @@
+# Basic PR Analysis Configuration
+# Minimal configuration for teams getting started with PR analysis
+
+project_name: "Basic PR Metrics Analysis"
+description: "Foundational PR metrics to understand team performance"
+
+tools:
+  # Only track common automation tools for filtering
+  - name: "dependabot"
+    display_name: "Dependabot"
+    enabled: true
+    category: "dependency_management"
+    usernames:
+      - "dependabot[bot]"
+      - "dependabot"
+    suggestion_patterns: []
+    comment_patterns: []
+
+  - name: "github-actions"
+    display_name: "GitHub Actions"
+    enabled: true
+    category: "ci_cd"
+    usernames:
+      - "github-actions[bot]"
+      - "github-actions"
+    suggestion_patterns: []
+    comment_patterns: []
+
+# Focus on core metrics only
+metrics:
+  time_to_first_review: true
+  time_to_merge: true
+  review_cycles: true
+  first_pass_approval: true
+  size_analysis: true
+  classify_stale_prs: true
+  classify_large_prs: true
+  classify_bot_prs: true
+
+  # Disable advanced metrics for simplicity
+  draft_duration: false
+  human_vs_bot_reviews: false
+  tool_suggestions: false
+  tool_adoption: false
+  tool_comments: false
+  outlier_detection: false
+
+settings:
+  stale_days: 14
+  large_pr_lines: 500    # Lower threshold for smaller teams
+  outlier_days: 21       # Slightly more lenient
+  use_percentiles: true
+  outlier_method: "iqr"
+
+reporting:
+  csv_export: true
+  markdown_report: true
+  json_export: false
+  executive_summary: true
+  time_metrics: true
+  quality_metrics: true
+  tool_analysis: false   # No tools configured yet
+  outlier_analysis: false
+  recommendations: true
+  baseline_comparison: false
+  multi_tool_comparison: false
+
+# Simplified recommendations focus
+recommendations:
+  focus_areas:
+    - "Review Response Time"
+    - "PR Size Management"
+    - "Review Cycle Efficiency"
+
+  success_metrics:
+    - "Median time to first review < 24 hours"
+    - "85% of PRs < 400 lines changed"
+    - "First-pass approval rate > 60%"

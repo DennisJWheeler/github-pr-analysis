@@ -1,0 +1,49 @@
+# Binaries
+github-pr-analysis
+github-pr-analysis.exe
+
+# Output files - generated analysis reports
+output/
+*_pr_analysis_*.md
+*_pr_metrics_*.csv
+BASELINE_METRICS.md
+PERMISSIONS_ASSESSMENT.md
+*baseline*.md
+*assessment*.md
+
+# Environment files
+.env
+
+# Go build artifacts
+*.o
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories (remove the comment below to include it)
+vendor/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
