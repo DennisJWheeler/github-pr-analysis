@@ -160,13 +160,37 @@ tools:
 github-pr-analysis analyze [owner/repo] [flags]
 
 Flags:
-  -c, --config string     Configuration file (YAML) for tool definitions and metrics
-  -t, --token string      GitHub personal access token (or set GITHUB_TOKEN env var)
-  -d, --days int          Number of days back to analyze (default: all time)
-  -o, --output-dir string Output directory for reports (default "./output")
-      --csv               Export CSV data (default true)
-      --report            Generate markdown report (default true)
-  -h, --help              Help for analyze
+  -c, --config string       Configuration file (YAML) for tool definitions and metrics
+  -t, --token string        GitHub personal access token (or set GITHUB_TOKEN env var)
+  -d, --days int            Number of days back to analyze (default: all time)
+      --start-date string   Start date for analysis (YYYY-MM-DD format)
+      --end-date string     End date for analysis (YYYY-MM-DD format)
+  -o, --output-dir string   Output directory for reports (default "./output")
+      --csv                 Export CSV data (default true)
+      --report              Generate markdown report (default true)
+  -h, --help                Help for analyze
+```
+
+### Date Range Examples
+
+```bash
+# Analyze all PRs created before CodeRabbit deployment
+./github-pr-analysis analyze --end-date 2024-11-12 owner/repo
+
+# Analyze PRs from a specific month
+./github-pr-analysis analyze \
+  --start-date 2024-10-01 \
+  --end-date 2024-10-31 \
+  owner/repo
+
+# Analyze recent PRs only (last 2 weeks)
+./github-pr-analysis analyze \
+  --start-date 2024-11-01 \
+  --end-date 2024-11-15 \
+  owner/repo
+
+# Legacy: Use days parameter (same as --start-date)
+./github-pr-analysis analyze --days 30 owner/repo
 ```
 
 ## Output Files
@@ -220,18 +244,20 @@ docker-compose run --rm github-pr-analysis analyze \
 
 ### Real-World CodeRabbit Evaluation Example
 ```bash
-# STEP 1: Establish 6-month baseline before deploying CodeRabbit
+# STEP 1: Establish clean baseline BEFORE CodeRabbit deployment
 export GITHUB_TOKEN="your_token"
 ./github-pr-analysis analyze \
   --config configs/basic-pr-analysis.yaml \
-  --days 180 \
+  --start-date 2024-05-01 \
+  --end-date 2024-11-12 \
   --output-dir ./baseline \
   mycompany/main-app
 
 # STEP 2: After 3 months with CodeRabbit, measure impact
 ./github-pr-analysis analyze \
   --config configs/coderabbit-evaluation.yaml \
-  --days 90 \
+  --start-date 2024-11-13 \
+  --end-date 2025-02-15 \
   --output-dir ./post-coderabbit \
   mycompany/main-app
 
@@ -241,6 +267,14 @@ export GITHUB_TOKEN="your_token"
 # - Time to merge (should decrease)
 # - First-pass approval rate (should increase)
 # - CodeRabbit suggestion adoption rate (track new metric)
+
+# BONUS: Analyze just the transition period
+./github-pr-analysis analyze \
+  --config configs/coderabbit-evaluation.yaml \
+  --start-date 2024-11-01 \
+  --end-date 2024-11-30 \
+  --output-dir ./transition \
+  mycompany/main-app
 ```
 
 ### Tool Effectiveness Analysis (After Implementation)

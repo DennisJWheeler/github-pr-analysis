@@ -427,8 +427,14 @@ func NewAnalyzer(token, repoName string, config *Config) (*Analyzer, error) {
 	}, nil
 }
 
+// DateRange represents a time window for filtering PRs
+type DateRange struct {
+	Start *time.Time
+	End   *time.Time
+}
+
 // GetPullRequests fetches pull requests from the repository
-func (a *Analyzer) GetPullRequests(state string, daysBack *int) ([]*github.PullRequest, error) {
+func (a *Analyzer) GetPullRequests(state string, dateRange *DateRange) ([]*github.PullRequest, error) {
 	opt := &github.PullRequestListOptions{
 		State:     state,
 		Sort:      "created",
@@ -439,6 +445,7 @@ func (a *Analyzer) GetPullRequests(state string, daysBack *int) ([]*github.PullR
 	}
 
 	var allPRs []*github.PullRequest
+	var stopFetching bool
 
 	for {
 		prs, resp, err := a.client.PullRequests.List(a.ctx, a.owner, a.repo, opt)
@@ -446,27 +453,59 @@ func (a *Analyzer) GetPullRequests(state string, daysBack *int) ([]*github.PullR
 			return nil, fmt.Errorf("failed to fetch pull requests: %w", err)
 		}
 
-		// Filter by date if specified
-		if daysBack != nil {
-			cutoff := time.Now().AddDate(0, 0, -*daysBack)
-			var filteredPRs []*github.PullRequest
-			for _, pr := range prs {
-				if pr.CreatedAt != nil && pr.CreatedAt.After(cutoff) {
-					filteredPRs = append(filteredPRs, pr)
-				}
+		// Filter by date range if specified
+		var filteredPRs []*github.PullRequest
+		for _, pr := range prs {
+			if pr.CreatedAt == nil {
+				continue
 			}
-			prs = filteredPRs
+
+			createdAt := *pr.CreatedAt
+
+			// Check if PR is before start date (too old)
+			if dateRange != nil && dateRange.Start != nil && createdAt.Before(*dateRange.Start) {
+				// Since PRs are sorted by creation date (desc), we can stop fetching
+				stopFetching = true
+				break
+			}
+
+			// Check if PR is after end date (too new)
+			if dateRange != nil && dateRange.End != nil && createdAt.After(*dateRange.End) {
+				continue
+			}
+
+			// PR is within the date range
+			filteredPRs = append(filteredPRs, pr)
 		}
 
-		allPRs = append(allPRs, prs...)
+		allPRs = append(allPRs, filteredPRs...)
 
-		if resp.NextPage == 0 {
+		// Stop fetching if we've gone past the start date or no more pages
+		if stopFetching || resp.NextPage == 0 {
 			break
 		}
 		opt.Page = resp.NextPage
 	}
 
-	log.Printf("Found %d pull requests\n", len(allPRs))
+	if dateRange != nil {
+		if dateRange.Start != nil && dateRange.End != nil {
+			log.Printf("Found %d pull requests between %s and %s\n",
+				len(allPRs),
+				dateRange.Start.Format("2006-01-02"),
+				dateRange.End.Format("2006-01-02"))
+		} else if dateRange.Start != nil {
+			log.Printf("Found %d pull requests after %s\n",
+				len(allPRs),
+				dateRange.Start.Format("2006-01-02"))
+		} else if dateRange.End != nil {
+			log.Printf("Found %d pull requests before %s\n",
+				len(allPRs),
+				dateRange.End.Format("2006-01-02"))
+		}
+	} else {
+		log.Printf("Found %d pull requests (all time)\n", len(allPRs))
+	}
+
 	return allPRs, nil
 }
 
@@ -717,8 +756,8 @@ func (a *Analyzer) AnalyzeSinglePR(pr *github.PullRequest) (*PRMetrics, error) {
 }
 
 // AnalyzeRepository analyzes all PRs in the repository
-func (a *Analyzer) AnalyzeRepository(daysBack *int) ([]*PRMetrics, error) {
-	prs, err := a.GetPullRequests("all", daysBack)
+func (a *Analyzer) AnalyzeRepository(dateRange *DateRange) ([]*PRMetrics, error) {
+	prs, err := a.GetPullRequests("all", dateRange)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pull requests: %w", err)
 	}
@@ -828,7 +867,7 @@ func ExportCSV(metrics []*PRMetrics, filename string) error {
 }
 
 // GenerateMarkdownReport creates a comprehensive markdown analysis report
-func GenerateMarkdownReport(metrics []*PRMetrics, repoName, outputFile string) error {
+func GenerateMarkdownReport(metrics []*PRMetrics, repoName, outputFile string, dateRange *DateRange) error {
 	if len(metrics) == 0 {
 		return fmt.Errorf("no metrics provided for report generation")
 	}
@@ -929,12 +968,28 @@ func GenerateMarkdownReport(metrics []*PRMetrics, repoName, outputFile string) e
 		toolAnalysisSection = "No tool activity detected in the analyzed PRs."
 	}
 
+	// Build date range description
+	dateRangeDesc := "All time"
+	if dateRange != nil {
+		if dateRange.Start != nil && dateRange.End != nil {
+			dateRangeDesc = fmt.Sprintf("%s to %s",
+				dateRange.Start.Format("2006-01-02"),
+				dateRange.End.Format("2006-01-02"))
+		} else if dateRange.Start != nil {
+			dateRangeDesc = fmt.Sprintf("After %s",
+				dateRange.Start.Format("2006-01-02"))
+		} else if dateRange.End != nil {
+			dateRangeDesc = fmt.Sprintf("Before %s",
+				dateRange.End.Format("2006-01-02"))
+		}
+	}
+
 	// Generate report content
 	report := fmt.Sprintf(`# GitHub PR Analysis Report
 
 **Generated:** %s
 **Repository:** %s
-**Analysis Period:** %d pull requests
+**Analysis Period:** %s (%d pull requests)
 
 ## Executive Summary
 
@@ -1045,6 +1100,7 @@ This analysis establishes your baseline performance before CodeRabbit deployment
 `,
 		time.Now().Format("2006-01-02 15:04:05 MST"),
 		repoName,
+		dateRangeDesc,
 		totalPRs,
 		// Executive summary
 		totalPRs, mergedPRs, openPRs, draftPRs, stalePRs, largePRs, botPRs,
@@ -1156,9 +1212,44 @@ var analyzeCmd = &cobra.Command{
 
 		configFile, _ := cmd.Flags().GetString("config")
 		days, _ := cmd.Flags().GetInt("days")
-		var daysBack *int
-		if days > 0 {
-			daysBack = &days
+		startDateStr, _ := cmd.Flags().GetString("start-date")
+		endDateStr, _ := cmd.Flags().GetString("end-date")
+
+		// Parse date range
+		var dateRange *DateRange
+		if startDateStr != "" || endDateStr != "" || days > 0 {
+			dateRange = &DateRange{}
+
+			// Parse start date
+			if startDateStr != "" {
+				startDate, err := time.Parse("2006-01-02", startDateStr)
+				if err != nil {
+					return fmt.Errorf("invalid start-date format. Use YYYY-MM-DD: %w", err)
+				}
+				dateRange.Start = &startDate
+			}
+
+			// Parse end date
+			if endDateStr != "" {
+				endDate, err := time.Parse("2006-01-02", endDateStr)
+				if err != nil {
+					return fmt.Errorf("invalid end-date format. Use YYYY-MM-DD: %w", err)
+				}
+				// Set end date to end of day
+				endOfDay := endDate.Add(23*time.Hour + 59*time.Minute + 59*time.Second)
+				dateRange.End = &endOfDay
+			}
+
+			// Handle legacy days parameter (if no start/end date specified)
+			if days > 0 && startDateStr == "" && endDateStr == "" {
+				startDate := time.Now().AddDate(0, 0, -days)
+				dateRange.Start = &startDate
+			}
+
+			// Validate date range
+			if dateRange.Start != nil && dateRange.End != nil && dateRange.Start.After(*dateRange.End) {
+				return fmt.Errorf("start-date cannot be after end-date")
+			}
 		}
 
 		outputDir, _ := cmd.Flags().GetString("output-dir")
@@ -1188,7 +1279,7 @@ var analyzeCmd = &cobra.Command{
 		}
 
 		// Analyze repository
-		metrics, err := analyzer.AnalyzeRepository(daysBack)
+		metrics, err := analyzer.AnalyzeRepository(dateRange)
 		if err != nil {
 			return fmt.Errorf("analysis failed: %w", err)
 		}
@@ -1211,7 +1302,7 @@ var analyzeCmd = &cobra.Command{
 
 		if generateReport {
 			mdFile := filepath.Join(outputDir, fmt.Sprintf("%s_pr_analysis_%s.md", repoSafe, timestamp))
-			if err := GenerateMarkdownReport(metrics, args[0], mdFile); err != nil {
+			if err := GenerateMarkdownReport(metrics, args[0], mdFile, dateRange); err != nil {
 				return fmt.Errorf("failed to generate report: %w", err)
 			}
 		}
@@ -1225,6 +1316,8 @@ func init() {
 	analyzeCmd.Flags().StringP("config", "c", "", "Configuration file (YAML) for tool definitions and metrics")
 	analyzeCmd.Flags().StringP("token", "t", "", "GitHub personal access token (or set GITHUB_TOKEN env var)")
 	analyzeCmd.Flags().IntP("days", "d", 0, "Number of days back to analyze (default: all time)")
+	analyzeCmd.Flags().String("start-date", "", "Start date for analysis (YYYY-MM-DD format)")
+	analyzeCmd.Flags().String("end-date", "", "End date for analysis (YYYY-MM-DD format)")
 	analyzeCmd.Flags().StringP("output-dir", "o", "./output", "Output directory for reports")
 	analyzeCmd.Flags().Bool("csv", true, "Export CSV data")
 	analyzeCmd.Flags().Bool("report", true, "Generate markdown report")
