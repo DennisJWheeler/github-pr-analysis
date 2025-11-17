@@ -866,6 +866,146 @@ func ExportCSV(metrics []*PRMetrics, filename string) error {
 	return nil
 }
 
+// generateProblematicPRsSection creates a listing of problematic PRs for manual validation
+func generateProblematicPRsSection(metrics []*PRMetrics, repoName string) string {
+	var outlierPRs []string
+	var largePRs []string
+	var slowSmallPRs []string
+	var stalePRs []string
+	var highCyclePRs []string
+
+	// Categorize problematic PRs
+	for _, pr := range metrics {
+		// Time outliers (merged PRs that took a very long time)
+		if pr.IsOutlier && pr.State == "closed" && pr.MergedAt != nil && pr.TimeToMerge != nil {
+			timeToMerge := *pr.TimeToMerge
+			daysToMerge := timeToMerge / 24
+			outlierPRs = append(outlierPRs, fmt.Sprintf(
+				"- **[PR #%d](%s)** (%.1f days) - %s by @%s - %d lines, %d commits",
+				pr.Number,
+				fmt.Sprintf("https://github.com/%s/pull/%d", repoName, pr.Number),
+				daysToMerge,
+				truncateTitle(pr.Title, 50),
+				pr.Author,
+				pr.TotalLinesChanged,
+				pr.Commits))
+		}
+
+		// Large PRs (human-authored, >500 lines)
+		if pr.IsLargePR && !pr.IsBotPR && pr.TotalLinesChanged > 500 {
+			timeDesc := "unknown time"
+			if pr.TimeToMerge != nil {
+				timeDesc = fmt.Sprintf("%.1f days", *pr.TimeToMerge/24)
+			}
+			largePRs = append(largePRs, fmt.Sprintf(
+				"- **[PR #%d](%s)** - @%s, %d lines, %s",
+				pr.Number,
+				fmt.Sprintf("https://github.com/%s/pull/%d", repoName, pr.Number),
+				pr.Author,
+				pr.TotalLinesChanged,
+				timeDesc))
+		}
+
+		// Slow small PRs (<200 lines but took >3 days)
+		if !pr.IsBotPR && pr.TotalLinesChanged < 200 && pr.TimeToMerge != nil && *pr.TimeToMerge > 72 {
+			slowSmallPRs = append(slowSmallPRs, fmt.Sprintf(
+				"- **[PR #%d](%s)** - @%s, %d lines, %.1f days (%s)",
+				pr.Number,
+				fmt.Sprintf("https://github.com/%s/pull/%d", repoName, pr.Number),
+				pr.Author,
+				pr.TotalLinesChanged,
+				*pr.TimeToMerge/24,
+				truncateTitle(pr.Title, 40)))
+		}
+
+		// Stale PRs (currently open >14 days)
+		if pr.IsStale {
+			daysOpen := time.Since(pr.CreatedAt).Hours() / 24
+			stalePRs = append(stalePRs, fmt.Sprintf(
+				"- **[PR #%d](%s)** (%.0f days open) - %s by @%s - %d lines",
+				pr.Number,
+				fmt.Sprintf("https://github.com/%s/pull/%d", repoName, pr.Number),
+				daysOpen,
+				truncateTitle(pr.Title, 50),
+				pr.Author,
+				pr.TotalLinesChanged))
+		}
+
+		// High review cycle PRs (>2 cycles)
+		if pr.ReviewCycles > 2 && !pr.IsBotPR {
+			highCyclePRs = append(highCyclePRs, fmt.Sprintf(
+				"- **[PR #%d](%s)** (%d review cycles) - %s by @%s",
+				pr.Number,
+				fmt.Sprintf("https://github.com/%s/pull/%d", repoName, pr.Number),
+				pr.ReviewCycles,
+				truncateTitle(pr.Title, 50),
+				pr.Author))
+		}
+	}
+
+	// Build the section
+	section := ""
+
+	if len(outlierPRs) > 0 {
+		section += "### Time Outlier PRs (Took >30 days)\n"
+		section += "*These PRs took significantly longer than normal and warrant investigation:*\n\n"
+		for _, pr := range outlierPRs {
+			section += pr + "\n"
+		}
+		section += "\n"
+	}
+
+	if len(largePRs) > 0 {
+		section += "### Large Human PRs (>500 lines)\n"
+		section += "*Consider if these could be broken into smaller PRs:*\n\n"
+		for _, pr := range largePRs {
+			section += pr + "\n"
+		}
+		section += "\n"
+	}
+
+	if len(slowSmallPRs) > 0 {
+		section += "### Slow Small PRs (<200 lines, >3 days)\n"
+		section += "*Small PRs that took unexpectedly long - investigate for process delays:*\n\n"
+		for _, pr := range slowSmallPRs {
+			section += pr + "\n"
+		}
+		section += "\n"
+	}
+
+	if len(stalePRs) > 0 {
+		section += "### Stale PRs (Open >14 days)\n"
+		section += "*Currently open PRs that may need attention:*\n\n"
+		for _, pr := range stalePRs {
+			section += pr + "\n"
+		}
+		section += "\n"
+	}
+
+	if len(highCyclePRs) > 0 {
+		section += "### High Review Cycle PRs (>2 cycles)\n"
+		section += "*PRs that required multiple rounds of changes:*\n\n"
+		for _, pr := range highCyclePRs {
+			section += pr + "\n"
+		}
+		section += "\n"
+	}
+
+	if section == "" {
+		section = "No problematic PRs detected in this analysis period. ✅\n\n"
+	}
+
+	return section
+}
+
+// truncateTitle truncates a PR title to a specified length for display
+func truncateTitle(title string, maxLength int) string {
+	if len(title) <= maxLength {
+		return title
+	}
+	return title[:maxLength-3] + "..."
+}
+
 // GenerateMarkdownReport creates a comprehensive markdown analysis report
 func GenerateMarkdownReport(metrics []*PRMetrics, repoName, outputFile string, dateRange *DateRange) error {
 	if len(metrics) == 0 {
@@ -968,6 +1108,9 @@ func GenerateMarkdownReport(metrics []*PRMetrics, repoName, outputFile string, d
 		toolAnalysisSection = "No tool activity detected in the analyzed PRs."
 	}
 
+	// Generate problematic PR listing section
+	problematicPRsSection := generateProblematicPRsSection(metrics, repoName)
+
 	// Build date range description
 	dateRangeDesc := "All time"
 	if dateRange != nil {
@@ -1031,6 +1174,12 @@ func GenerateMarkdownReport(metrics []*PRMetrics, repoName, outputFile string, d
 - **Large PRs (>800 lines):** %d (%.1f%% of total)
 
 ## Tool Activity Analysis
+
+%s
+
+## Problematic PRs Requiring Review
+
+*The following PRs were flagged for manual investigation. Click PR numbers to view details on GitHub.*
 
 %s
 
@@ -1116,6 +1265,8 @@ This analysis establishes your baseline performance before CodeRabbit deployment
 		largePRs, float64(largePRs)/float64(totalPRs)*100,
 		// Tool Analysis (dynamic)
 		toolAnalysisSection,
+		// Problematic PRs
+		problematicPRsSection,
 		// Outliers
 		timeToFirstReviewStats.OutlierMax, timeToMergeStats.OutlierMax,
 		float64(800), totalLinesChangedStats.OutlierMax,
