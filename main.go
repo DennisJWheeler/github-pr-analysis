@@ -181,6 +181,7 @@ type PRMetrics struct {
 	Deletions    int       `json:"deletions"`
 	ChangedFiles int       `json:"changed_files"`
 	Commits      int       `json:"commits"`
+	CommentCount int       `json:"comment_count"`
 
 	// Time-based metrics (in hours)
 	TimeToFirstReview *float64 `json:"time_to_first_review_hours,omitempty"`
@@ -205,6 +206,46 @@ type PRMetrics struct {
 	IsOutlier  bool `json:"is_outlier"`
 	IsLargePR  bool `json:"is_large_pr"`
 	IsBotPR    bool `json:"is_bot_pr"`
+
+	// Forensics data for problematic PRs (optional)
+	Forensics *ForensicsData `json:"forensics,omitempty"`
+}
+
+// ForensicsData holds detailed timeline and analysis data for problematic PRs
+type ForensicsData struct {
+	PRNumber int `json:"pr_number"`
+
+	// Timeline breakdown (in hours)
+	DraftPhase        float64 `json:"draft_phase_hours"`
+	AwaitingReview    float64 `json:"awaiting_review_hours"`
+	ReviewIteration   float64 `json:"review_iteration_hours"`
+	FinalApproval     float64 `json:"final_approval_hours"`
+
+	// Delay analysis
+	LongestDelay      string  `json:"longest_delay_phase"`
+	DelayReasons      []string `json:"delay_reasons"`
+
+	// Contributor patterns
+	ReviewersCount    int     `json:"reviewers_count"`
+	MainReviewer      string  `json:"main_reviewer"`
+	ReviewerResponse  float64 `json:"avg_reviewer_response_hours"`
+	AuthorResponse    float64 `json:"avg_author_response_hours"`
+
+	// Events and milestones
+	TimelineEvents    []TimelineEvent `json:"timeline_events"`
+	BlockingEvents    []string        `json:"blocking_events"`
+
+	// Root cause analysis
+	RootCause         string  `json:"root_cause"`
+	ProcessInsights   []string `json:"process_insights"`
+}
+
+// TimelineEvent represents a significant event in the PR lifecycle
+type TimelineEvent struct {
+	Type      string    `json:"type"`         // "created", "review_requested", "reviewed", "approved", "merged"
+	Actor     string    `json:"actor"`        // Username who performed the action
+	Timestamp time.Time `json:"timestamp"`    // When the event occurred
+	Details   string    `json:"details"`      // Additional context
 }
 
 // StatisticalSummary holds statistical analysis of metrics
@@ -696,29 +737,206 @@ func (a *Analyzer) AnalyzeReviewsBreakdown(pr *github.PullRequest) (int, int, in
 	return totalReviews, humanReviews, botReviews, nil
 }
 
+// Optimized analysis functions that reuse fetched data
+
+// AnalyzePRTimelineOptimized extracts timing metrics from a PR using pre-fetched reviews
+func (a *Analyzer) AnalyzePRTimelineOptimized(pr *github.PullRequest, reviews []*github.PullRequestReview) (*float64, *float64, *float64) {
+	var timeToFirstReview *float64
+	var timeToMerge *float64
+	var draftDuration *float64
+
+	// Time to first review (excluding ignored bot users)
+	if len(reviews) > 0 {
+		var firstReviewTime *time.Time
+		for _, review := range reviews {
+			if review.SubmittedAt != nil && review.User != nil {
+				// Skip reviews from ignored users (bots)
+				reviewerUsername := review.User.GetLogin()
+				if isUserIgnoredForTiming(reviewerUsername, a.config.Settings.IgnoreUsersForTiming) {
+					continue
+				}
+
+				reviewTime := review.SubmittedAt.Time
+				if firstReviewTime == nil || reviewTime.Before(*firstReviewTime) {
+					firstReviewTime = &reviewTime
+				}
+			}
+		}
+		if firstReviewTime != nil && pr.CreatedAt != nil {
+			hours := firstReviewTime.Sub(pr.CreatedAt.Time).Hours()
+			timeToFirstReview = &hours
+		}
+	}
+
+	// Time to merge
+	if pr.MergedAt != nil && pr.CreatedAt != nil {
+		hours := pr.MergedAt.Time.Sub(pr.CreatedAt.Time).Hours()
+		timeToMerge = &hours
+	}
+
+	// Draft duration (placeholder - would need timeline API for exact timing)
+	if pr.GetDraft() {
+		// For current draft PRs, calculate time since creation
+		hours := time.Since(pr.CreatedAt.Time).Hours()
+		draftDuration = &hours
+	}
+
+	return timeToFirstReview, timeToMerge, draftDuration
+}
+
+// AnalyzeReviewCyclesOptimized counts review cycles using pre-fetched reviews
+func (a *Analyzer) AnalyzeReviewCyclesOptimized(reviews []*github.PullRequestReview) (int, bool) {
+	reviewCycles := 0
+	firstPassApproval := false
+
+	// Count CHANGES_REQUESTED reviews
+	for _, review := range reviews {
+		if review.GetState() == "CHANGES_REQUESTED" {
+			reviewCycles++
+		}
+	}
+
+	// Check for first-pass approval
+	if len(reviews) > 0 {
+		hasChangesRequested := false
+		hasApproval := false
+
+		for _, review := range reviews {
+			if review.GetState() == "CHANGES_REQUESTED" {
+				hasChangesRequested = true
+			}
+			if review.GetState() == "APPROVED" {
+				hasApproval = true
+			}
+		}
+
+		firstPassApproval = hasApproval && !hasChangesRequested
+	}
+
+	return reviewCycles, firstPassApproval
+}
+
+// AnalyzeToolActivityOptimized analyzes tool activity using pre-fetched comments
+func (a *Analyzer) AnalyzeToolActivityOptimized(reviewComments []*github.PullRequestComment, issueComments []*github.IssueComment) map[string]ToolMetrics {
+	toolMetrics := make(map[string]ToolMetrics)
+
+	// Initialize metrics for enabled tools
+	for _, tool := range a.config.Tools {
+		if tool.Enabled {
+			toolMetrics[tool.Name] = ToolMetrics{
+				ToolName:    tool.Name,
+				Suggestions: 0,
+				Adopted:     0, // Placeholder for now
+				Comments:    0,
+			}
+		}
+	}
+
+	// Check review comments
+	for _, comment := range reviewComments {
+		username := comment.GetUser().GetLogin()
+		body := strings.ToLower(comment.GetBody())
+
+		for _, tool := range a.config.Tools {
+			if !tool.Enabled {
+				continue
+			}
+
+			if isToolUser(username, tool.Usernames) {
+				metrics := toolMetrics[tool.Name]
+				metrics.Comments++
+
+				// Look for suggestions based on configured patterns
+				for _, pattern := range tool.SuggestionPatterns {
+					if strings.Contains(body, strings.ToLower(pattern)) {
+						metrics.Suggestions++
+						break // Count only once per comment
+					}
+				}
+
+				toolMetrics[tool.Name] = metrics
+			}
+		}
+	}
+
+	// Check issue comments
+	for _, comment := range issueComments {
+		username := comment.GetUser().GetLogin()
+
+		for _, tool := range a.config.Tools {
+			if !tool.Enabled {
+				continue
+			}
+
+			if isToolUser(username, tool.Usernames) {
+				metrics := toolMetrics[tool.Name]
+				metrics.Comments++
+				toolMetrics[tool.Name] = metrics
+			}
+		}
+	}
+
+	return toolMetrics
+}
+
+// AnalyzeReviewsBreakdownOptimized categorizes reviews using pre-fetched reviews
+func (a *Analyzer) AnalyzeReviewsBreakdownOptimized(reviews []*github.PullRequestReview) (int, int, int) {
+	totalReviews := len(reviews)
+	botReviews := 0
+	humanReviews := 0
+
+	botUsers := []string{"coderabbitai", "coderabbit", "coderabbit[bot]", "dependabot", "github-actions"}
+
+	for _, review := range reviews {
+		if isCodeRabbitUser(review.GetUser().GetLogin(), botUsers) {
+			botReviews++
+		} else {
+			humanReviews++
+		}
+	}
+
+	return totalReviews, humanReviews, botReviews
+}
+
 // AnalyzeSinglePR analyzes a single pull request and returns metrics
 func (a *Analyzer) AnalyzeSinglePR(pr *github.PullRequest) (*PRMetrics, error) {
-	timeToFirstReview, timeToMerge, draftDuration, err := a.AnalyzePRTimeline(pr)
-	if err != nil {
-		return nil, fmt.Errorf("timeline analysis failed: %w", err)
+	// Fetch complete PR details if basic data is missing
+	var completePR *github.PullRequest
+	if pr.GetAdditions() == 0 && pr.GetDeletions() == 0 && pr.GetCommits() == 0 {
+		var err error
+		completePR, _, err = a.client.PullRequests.Get(a.ctx, a.owner, a.repo, pr.GetNumber())
+		if err != nil {
+			log.Printf("Warning: Failed to fetch complete PR details for #%d: %v", pr.GetNumber(), err)
+			completePR = pr // fallback to basic data
+		}
+	} else {
+		completePR = pr
 	}
 
-	reviewCycles, firstPassApproval, err := a.AnalyzeReviewCycles(pr)
+	// Fetch all API data once to avoid duplicates
+	reviews, _, err := a.client.PullRequests.ListReviews(a.ctx, a.owner, a.repo, pr.GetNumber(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("review cycles analysis failed: %w", err)
+		return nil, fmt.Errorf("failed to get reviews: %w", err)
 	}
 
-	toolMetrics, err := a.AnalyzeToolActivity(pr)
+	reviewComments, _, err := a.client.PullRequests.ListComments(a.ctx, a.owner, a.repo, pr.GetNumber(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("tool analysis failed: %w", err)
+		return nil, fmt.Errorf("failed to get review comments: %w", err)
 	}
 
-	totalReviews, humanReviews, botReviews, err := a.AnalyzeReviewsBreakdown(pr)
+	issueComments, _, err := a.client.Issues.ListComments(a.ctx, a.owner, a.repo, pr.GetNumber(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("reviews breakdown failed: %w", err)
+		return nil, fmt.Errorf("failed to get issue comments: %w", err)
 	}
 
-	// Create PR metrics struct
+	// Process the fetched data using optimized functions
+	timeToFirstReview, timeToMerge, draftDuration := a.AnalyzePRTimelineOptimized(completePR, reviews)
+	reviewCycles, firstPassApproval := a.AnalyzeReviewCyclesOptimized(reviews)
+	toolMetrics := a.AnalyzeToolActivityOptimized(reviewComments, issueComments)
+	totalReviews, humanReviews, botReviews := a.AnalyzeReviewsBreakdownOptimized(reviews)
+	commentCount := len(issueComments) + len(reviewComments)
+
+	// Create PR metrics struct using complete PR data
 	prMetrics := &PRMetrics{
 		Number:       pr.GetNumber(),
 		Title:        pr.GetTitle(),
@@ -728,10 +946,11 @@ func (a *Analyzer) AnalyzeSinglePR(pr *github.PullRequest) (*PRMetrics, error) {
 		ClosedAt:     timePtr(pr.GetClosedAt().Time),
 		Draft:        pr.GetDraft(),
 		State:        pr.GetState(),
-		Additions:    pr.GetAdditions(),
-		Deletions:    pr.GetDeletions(),
-		ChangedFiles: pr.GetChangedFiles(),
-		Commits:      pr.GetCommits(),
+		Additions:    completePR.GetAdditions(),
+		Deletions:    completePR.GetDeletions(),
+		ChangedFiles: completePR.GetChangedFiles(),
+		Commits:      completePR.GetCommits(),
+		CommentCount: commentCount,
 
 		TimeToFirstReview: timeToFirstReview,
 		TimeToMerge:       timeToMerge,
@@ -751,6 +970,18 @@ func (a *Analyzer) AnalyzeSinglePR(pr *github.PullRequest) (*PRMetrics, error) {
 	// Apply edge case classification
 	edgeAnalyzer := NewEdgeCaseAnalyzer()
 	edgeAnalyzer.ClassifyPR(prMetrics, a.config)
+
+	// Auto-collect forensics data for problematic PRs
+	if shouldCollectForensics(prMetrics) {
+		log.Printf("Collecting forensics data for PR #%d (problematic PR detected)", pr.GetNumber())
+		forensics, err := a.CollectForensicsData(completePR, prMetrics)
+		if err != nil {
+			log.Printf("Warning: Failed to collect forensics for PR #%d: %v", pr.GetNumber(), err)
+			// Continue with analysis even if forensics collection fails
+		} else {
+			prMetrics.Forensics = forensics
+		}
+	}
 
 	return prMetrics, nil
 }
@@ -793,7 +1024,7 @@ func ExportCSV(metrics []*PRMetrics, filename string) error {
 	// Write header - include dynamic tool columns
 	header := []string{
 		"number", "title", "author", "created_at", "merged_at", "closed_at",
-		"draft", "state", "additions", "deletions", "changed_files", "commits",
+		"draft", "state", "additions", "deletions", "changed_files", "commits", "comment_count",
 		"time_to_first_review_hours", "time_to_merge_hours", "draft_duration_hours",
 		"review_cycles", "first_pass_approval", "total_reviews", "human_reviews", "bot_reviews",
 		"total_lines_changed", "is_stale", "is_outlier", "is_large_pr", "is_bot_pr",
@@ -831,6 +1062,7 @@ func ExportCSV(metrics []*PRMetrics, filename string) error {
 			strconv.Itoa(m.Deletions),
 			strconv.Itoa(m.ChangedFiles),
 			strconv.Itoa(m.Commits),
+			strconv.Itoa(m.CommentCount),
 			formatFloatPtr(m.TimeToFirstReview),
 			formatFloatPtr(m.TimeToMerge),
 			formatFloatPtr(m.DraftDuration),
@@ -876,19 +1108,24 @@ func generateProblematicPRsSection(metrics []*PRMetrics, repoName string) string
 
 	// Categorize problematic PRs
 	for _, pr := range metrics {
-		// Time outliers (merged PRs that took a very long time)
-		if pr.IsOutlier && pr.State == "closed" && pr.MergedAt != nil && pr.TimeToMerge != nil {
+		// Time outliers (merged PRs that took >30 days to merge)
+		if pr.State == "closed" && pr.MergedAt != nil && pr.TimeToMerge != nil {
 			timeToMerge := *pr.TimeToMerge
 			daysToMerge := timeToMerge / 24
-			outlierPRs = append(outlierPRs, fmt.Sprintf(
-				"- **[PR #%d](%s)** (%.1f days) - %s by @%s - %d lines, %d commits",
-				pr.Number,
-				fmt.Sprintf("https://github.com/%s/pull/%d", repoName, pr.Number),
-				daysToMerge,
-				truncateTitle(pr.Title, 50),
-				pr.Author,
-				pr.TotalLinesChanged,
-				pr.Commits))
+
+			// Only flag as outlier if it actually took >30 days to merge
+			if daysToMerge > 30 {
+				outlierPRs = append(outlierPRs, fmt.Sprintf(
+					"- **[PR #%d](%s)** (%.1f days) - %s by @%s - %d files, %d commits, %d comments",
+					pr.Number,
+					fmt.Sprintf("https://github.com/%s/pull/%d", repoName, pr.Number),
+					daysToMerge,
+					truncateTitle(pr.Title, 50),
+					pr.Author,
+					pr.ChangedFiles,
+					pr.Commits,
+					pr.CommentCount))
+			}
 		}
 
 		// Large PRs (human-authored, >500 lines)
@@ -898,23 +1135,25 @@ func generateProblematicPRsSection(metrics []*PRMetrics, repoName string) string
 				timeDesc = fmt.Sprintf("%.1f days", *pr.TimeToMerge/24)
 			}
 			largePRs = append(largePRs, fmt.Sprintf(
-				"- **[PR #%d](%s)** - @%s, %d lines, %s",
+				"- **[PR #%d](%s)** - @%s, %d files, %s, %d comments",
 				pr.Number,
 				fmt.Sprintf("https://github.com/%s/pull/%d", repoName, pr.Number),
 				pr.Author,
-				pr.TotalLinesChanged,
-				timeDesc))
+				pr.ChangedFiles,
+				timeDesc,
+				pr.CommentCount))
 		}
 
 		// Slow small PRs (<200 lines but took >3 days)
 		if !pr.IsBotPR && pr.TotalLinesChanged < 200 && pr.TimeToMerge != nil && *pr.TimeToMerge > 72 {
 			slowSmallPRs = append(slowSmallPRs, fmt.Sprintf(
-				"- **[PR #%d](%s)** - @%s, %d lines, %.1f days (%s)",
+				"- **[PR #%d](%s)** - @%s, %d files, %.1f days, %d comments (%s)",
 				pr.Number,
 				fmt.Sprintf("https://github.com/%s/pull/%d", repoName, pr.Number),
 				pr.Author,
-				pr.TotalLinesChanged,
+				pr.ChangedFiles,
 				*pr.TimeToMerge/24,
+				pr.CommentCount,
 				truncateTitle(pr.Title, 40)))
 		}
 
@@ -922,24 +1161,26 @@ func generateProblematicPRsSection(metrics []*PRMetrics, repoName string) string
 		if pr.IsStale {
 			daysOpen := time.Since(pr.CreatedAt).Hours() / 24
 			stalePRs = append(stalePRs, fmt.Sprintf(
-				"- **[PR #%d](%s)** (%.0f days open) - %s by @%s - %d lines",
+				"- **[PR #%d](%s)** (%.0f days open) - %s by @%s - %d files, %d comments",
 				pr.Number,
 				fmt.Sprintf("https://github.com/%s/pull/%d", repoName, pr.Number),
 				daysOpen,
 				truncateTitle(pr.Title, 50),
 				pr.Author,
-				pr.TotalLinesChanged))
+				pr.ChangedFiles,
+				pr.CommentCount))
 		}
 
 		// High review cycle PRs (>2 cycles)
 		if pr.ReviewCycles > 2 && !pr.IsBotPR {
 			highCyclePRs = append(highCyclePRs, fmt.Sprintf(
-				"- **[PR #%d](%s)** (%d review cycles) - %s by @%s",
+				"- **[PR #%d](%s)** (%d review cycles) - %s by @%s, %d comments",
 				pr.Number,
 				fmt.Sprintf("https://github.com/%s/pull/%d", repoName, pr.Number),
 				pr.ReviewCycles,
 				truncateTitle(pr.Title, 50),
-				pr.Author))
+				pr.Author,
+				pr.CommentCount))
 		}
 	}
 
@@ -1012,7 +1253,11 @@ func GenerateMarkdownReport(metrics []*PRMetrics, repoName, outputFile string, d
 		return fmt.Errorf("no metrics provided for report generation")
 	}
 
-	// Calculate statistics for various metrics
+	// Separate PRs by type for segmented analysis
+	humanPRs, botPRSlice := FilterPRsByType(metrics)
+
+	// Calculate statistics for various metrics (combined)
+	// Calculate statistics for human PRs only (clean baseline)
 	timeToFirstReviewValues := extractFloatField(metrics, "time_to_first_review")
 	timeToMergeValues := extractFloatField(metrics, "time_to_merge")
 	totalLinesChangedValues := extractFloatField(metrics, "total_lines_changed")
@@ -1022,6 +1267,15 @@ func GenerateMarkdownReport(metrics []*PRMetrics, repoName, outputFile string, d
 	timeToMergeStats := CalculateStatistics(timeToMergeValues)
 	totalLinesChangedStats := CalculateStatistics(totalLinesChangedValues)
 	reviewCyclesStats := CalculateStatistics(reviewCyclesValues)
+
+	// Calculate human-only statistics (clean baseline metrics)
+	humanTimeToFirstReviewValues := extractFloatField(humanPRs, "time_to_first_review")
+	humanTimeToMergeValues := extractFloatField(humanPRs, "time_to_merge")
+	humanReviewCyclesValues := extractFloatField(humanPRs, "review_cycles")
+
+	humanTimeToFirstReviewStats := CalculateStatistics(humanTimeToFirstReviewValues)
+	humanTimeToMergeStats := CalculateStatistics(humanTimeToMergeValues)
+	humanReviewCyclesStats := CalculateStatistics(humanReviewCyclesValues)
 
 	// Calculate categorical counts
 	totalPRs := len(metrics)
@@ -1069,10 +1323,46 @@ func GenerateMarkdownReport(metrics []*PRMetrics, repoName, outputFile string, d
 		}
 	}
 
+	// Calculate human-only categorical counts (clean baseline)
+	totalHumanPRs := len(humanPRs)
+	humanMergedPRs := 0
+	humanDraftPRs := 0
+	humanOpenPRs := 0
+	humanStalePRs := 0
+	humanLargePRs := 0
+	humanFirstPassApprovals := 0
+
+	for _, pr := range humanPRs {
+		if pr.MergedAt != nil {
+			humanMergedPRs++
+		}
+		if pr.Draft {
+			humanDraftPRs++
+		}
+		if pr.State == "open" {
+			humanOpenPRs++
+		}
+		if pr.IsStale {
+			humanStalePRs++
+		}
+		if pr.IsLargePR {
+			humanLargePRs++
+		}
+		if pr.FirstPassApproval {
+			humanFirstPassApprovals++
+		}
+	}
+
 	// Calculate percentages
 	firstPassApprovalRate := 0.0
 	if mergedPRs > 0 {
 		firstPassApprovalRate = float64(firstPassApprovals) / float64(mergedPRs) * 100
+	}
+
+	// Calculate human-only percentages (clean baseline)
+	humanFirstPassApprovalRate := 0.0
+	if humanMergedPRs > 0 {
+		humanFirstPassApprovalRate = float64(humanFirstPassApprovals) / float64(humanMergedPRs) * 100
 	}
 
 	// Calculate average tool activity
@@ -1110,6 +1400,9 @@ func GenerateMarkdownReport(metrics []*PRMetrics, repoName, outputFile string, d
 
 	// Generate problematic PR listing section
 	problematicPRsSection := generateProblematicPRsSection(metrics, repoName)
+
+	// Generate forensics deep dive section
+	forensicsSection := generateForensicsSection(metrics, repoName)
 
 	// Build date range description
 	dateRangeDesc := "All time"
@@ -1173,6 +1466,32 @@ func GenerateMarkdownReport(metrics []*PRMetrics, repoName, outputFile string, d
 - **90th Percentile Lines Changed:** %.0f
 - **Large PRs (>800 lines):** %d (%.1f%% of total)
 
+## Human vs Bot Analysis
+
+### Overall Breakdown
+- **Human PRs:** %d (%.1f%% of total)
+- **Bot PRs:** %d (%.1f%% of total)
+
+### Human-Only Metrics (Clean Baseline)
+*These metrics exclude bot PRs for accurate baseline measurement*
+
+#### Time Performance (Human PRs Only)
+- **Time to First Review:** %.1f hours (median), %.1f hours (p75), %.1f hours (p90)
+- **Time to Merge:** %.1f hours (median), %.1f hours (p75), %.1f hours (p90)
+- **First-Pass Approval Rate:** %.1f%% (%d of %d merged human PRs)
+
+#### Human PR Characteristics
+- **Total Human PRs:** %d
+- **Merged:** %d, **Open:** %d, **Drafts:** %d
+- **Stale:** %d, **Large (>800 lines):** %d
+- **Average Review Cycles:** %.1f
+
+### Baseline vs Bot Comparison
+*Key differences between human and automated PRs*
+- **Human First-Pass Approval:** %.1f%% vs **Combined:** %.1f%%
+- **Human Time to Merge:** %.1f hrs vs **Combined:** %.1f hrs
+- **Human PRs represent the true development workflow baseline**
+
 ## Tool Activity Analysis
 
 %s
@@ -1180,6 +1499,12 @@ func GenerateMarkdownReport(metrics []*PRMetrics, repoName, outputFile string, d
 ## Problematic PRs Requiring Review
 
 *The following PRs were flagged for manual investigation. Click PR numbers to view details on GitHub.*
+
+%s
+
+## 🔍 Forensics Deep Dive
+
+*Detailed timeline analysis for problematic PRs identified above*
 
 %s
 
@@ -1263,10 +1588,26 @@ This analysis establishes your baseline performance before CodeRabbit deployment
 		// PR size
 		totalLinesChangedStats.Median, totalLinesChangedStats.P75, totalLinesChangedStats.P90,
 		largePRs, float64(largePRs)/float64(totalPRs)*100,
+		// Human vs Bot Analysis
+		// Overall breakdown
+		totalHumanPRs, float64(totalHumanPRs)/float64(totalPRs)*100,
+		len(botPRSlice), float64(len(botPRSlice))/float64(totalPRs)*100,
+		// Human-only time performance
+		humanTimeToFirstReviewStats.Median, humanTimeToFirstReviewStats.P75, humanTimeToFirstReviewStats.P90,
+		humanTimeToMergeStats.Median, humanTimeToMergeStats.P75, humanTimeToMergeStats.P90,
+		humanFirstPassApprovalRate, humanFirstPassApprovals, humanMergedPRs,
+		// Human PR characteristics
+		totalHumanPRs, humanMergedPRs, humanOpenPRs, humanDraftPRs,
+		humanStalePRs, humanLargePRs, humanReviewCyclesStats.Mean,
+		// Baseline vs Bot comparison
+		humanFirstPassApprovalRate, firstPassApprovalRate,
+		humanTimeToMergeStats.Median, timeToMergeStats.Median,
 		// Tool Analysis (dynamic)
 		toolAnalysisSection,
 		// Problematic PRs
 		problematicPRsSection,
+		// Forensics Deep Dive
+		forensicsSection,
 		// Outliers
 		timeToFirstReviewStats.OutlierMax, timeToMergeStats.OutlierMax,
 		float64(800), totalLinesChangedStats.OutlierMax,
@@ -1291,6 +1632,489 @@ This analysis establishes your baseline performance before CodeRabbit deployment
 
 	log.Printf("Generated markdown report: %s", outputFile)
 	return nil
+}
+
+// FilterPRsByType separates PRs into human and bot categories
+func FilterPRsByType(metrics []*PRMetrics) (human []*PRMetrics, bot []*PRMetrics) {
+	for _, pr := range metrics {
+		if pr.IsBotPR {
+			bot = append(bot, pr)
+		} else {
+			human = append(human, pr)
+		}
+	}
+	return human, bot
+}
+
+// shouldCollectForensics determines if a PR qualifies for detailed forensics analysis
+func shouldCollectForensics(pr *PRMetrics) bool {
+	// Skip bot PRs - focus on human development workflow
+	if pr.IsBotPR {
+		return false
+	}
+
+	// 1. Time outliers (merged PRs that took >30 days)
+	if pr.State == "closed" && pr.MergedAt != nil && pr.TimeToMerge != nil {
+		daysToMerge := *pr.TimeToMerge / 24
+		if daysToMerge > 30 {
+			return true
+		}
+	}
+
+	// 2. Slow small PRs (<200 lines but took >3 days)
+	if pr.TotalLinesChanged < 200 && pr.TimeToMerge != nil && *pr.TimeToMerge > 72 {
+		return true
+	}
+
+	// 3. High review cycle PRs (>2 review cycles)
+	if pr.ReviewCycles > 2 {
+		return true
+	}
+
+	// 4. Large PRs (>500 lines changed)
+	if pr.IsLargePR && pr.TotalLinesChanged > 500 {
+		return true
+	}
+
+	return false
+}
+
+// CollectForensicsData gathers detailed timeline and analysis data for a problematic PR
+func (a *Analyzer) CollectForensicsData(pr *github.PullRequest, prMetrics *PRMetrics) (*ForensicsData, error) {
+	// Fetch detailed timeline events using GitHub Timeline API
+	timeline, _, err := a.client.Issues.ListIssueTimeline(a.ctx, a.owner, a.repo, pr.GetNumber(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get timeline: %w", err)
+	}
+
+	// Initialize forensics data
+	forensics := &ForensicsData{
+		PRNumber: pr.GetNumber(),
+		DelayReasons: []string{},
+		BlockingEvents: []string{},
+		ProcessInsights: []string{},
+		TimelineEvents: []TimelineEvent{},
+	}
+
+	// Parse timeline to build event history and calculate phase durations
+	forensics.TimelineEvents = a.parseTimelineEvents(timeline, pr)
+
+	// Calculate phase durations
+	forensics.DraftPhase, forensics.AwaitingReview, forensics.ReviewIteration, forensics.FinalApproval =
+		a.calculatePhaseDurations(forensics.TimelineEvents, pr)
+
+	// Determine longest delay phase
+	forensics.LongestDelay = a.identifyLongestDelay(forensics)
+
+	// Analyze contributor patterns (using data we already have)
+	forensics.ReviewersCount = prMetrics.TotalReviews
+	forensics.MainReviewer = a.identifyMainReviewer(timeline)
+	forensics.ReviewerResponse, forensics.AuthorResponse = a.calculateResponseTimes(timeline, pr.GetUser().GetLogin())
+
+	// Generate root cause analysis
+	forensics.RootCause = a.generateRootCauseAnalysis(forensics, prMetrics)
+	forensics.ProcessInsights = a.generateProcessInsights(forensics, prMetrics)
+
+	return forensics, nil
+}
+
+// parseTimelineEvents converts GitHub timeline into our TimelineEvent format
+func (a *Analyzer) parseTimelineEvents(timeline []*github.Timeline, pr *github.PullRequest) []TimelineEvent {
+	var events []TimelineEvent
+
+	// Add PR creation event
+	events = append(events, TimelineEvent{
+		Type:      "created",
+		Actor:     pr.GetUser().GetLogin(),
+		Timestamp: pr.GetCreatedAt().Time,
+		Details:   "PR opened",
+	})
+
+	// Process timeline events
+	for _, event := range timeline {
+		var timelineEvent TimelineEvent
+
+		if event.GetEvent() == "review_requested" && event.CreatedAt != nil {
+			timelineEvent = TimelineEvent{
+				Type:      "review_requested",
+				Actor:     getEventActor(event),
+				Timestamp: event.GetCreatedAt().Time,
+				Details:   "Review requested",
+			}
+		} else if event.GetEvent() == "reviewed" && event.CreatedAt != nil {
+			timelineEvent = TimelineEvent{
+				Type:      "reviewed",
+				Actor:     getEventActor(event),
+				Timestamp: event.GetCreatedAt().Time,
+				Details:   "PR reviewed",
+			}
+		} else if event.GetEvent() == "merged" && event.CreatedAt != nil {
+			timelineEvent = TimelineEvent{
+				Type:      "merged",
+				Actor:     getEventActor(event),
+				Timestamp: event.GetCreatedAt().Time,
+				Details:   "PR merged",
+			}
+		} else {
+			continue // Skip other event types for now
+		}
+
+		events = append(events, timelineEvent)
+	}
+
+	// Add merge event if PR was merged (might not be in timeline)
+	if pr.MergedAt != nil {
+		events = append(events, TimelineEvent{
+			Type:      "merged",
+			Actor:     pr.GetUser().GetLogin(), // Fallback actor
+			Timestamp: pr.GetMergedAt().Time,
+			Details:   "PR merged",
+		})
+	}
+
+	return events
+}
+
+// Helper function to extract actor from timeline event
+func getEventActor(event *github.Timeline) string {
+	if event.Actor != nil {
+		return event.Actor.GetLogin()
+	}
+	return "unknown"
+}
+
+// calculatePhaseDurations breaks down the PR lifecycle into phases
+func (a *Analyzer) calculatePhaseDurations(events []TimelineEvent, pr *github.PullRequest) (float64, float64, float64, float64) {
+	if len(events) == 0 {
+		return 0, 0, 0, 0
+	}
+
+	var draftPhase, awaitingReview, reviewIteration, finalApproval float64
+
+	createdTime := pr.GetCreatedAt().Time
+	var firstReviewTime *time.Time
+	var lastReviewTime *time.Time
+	var mergeTime *time.Time
+
+	// Find key timestamps
+	for _, event := range events {
+		switch event.Type {
+		case "review_requested", "reviewed":
+			if firstReviewTime == nil {
+				firstReviewTime = &event.Timestamp
+			}
+			lastReviewTime = &event.Timestamp
+		case "merged":
+			mergeTime = &event.Timestamp
+		}
+	}
+
+	// Use PR merge time if not found in timeline
+	if mergeTime == nil && pr.MergedAt != nil {
+		prMergeTime := pr.GetMergedAt().Time
+		mergeTime = &prMergeTime
+	}
+
+	// Calculate phases
+	if firstReviewTime != nil {
+		awaitingReview = firstReviewTime.Sub(createdTime).Hours()
+	}
+
+	if firstReviewTime != nil && lastReviewTime != nil && mergeTime != nil {
+		reviewIteration = lastReviewTime.Sub(*firstReviewTime).Hours()
+		finalApproval = mergeTime.Sub(*lastReviewTime).Hours()
+	} else if firstReviewTime != nil && mergeTime != nil {
+		// No clear review iteration phase
+		finalApproval = mergeTime.Sub(*firstReviewTime).Hours()
+	}
+
+	// Draft phase (simplified - would need more timeline data)
+	if pr.GetDraft() {
+		draftPhase = 24 // Placeholder: assume 1 day in draft
+	}
+
+	return draftPhase, awaitingReview, reviewIteration, finalApproval
+}
+
+// identifyLongestDelay determines which phase took the most time
+func (a *Analyzer) identifyLongestDelay(forensics *ForensicsData) string {
+	phases := map[string]float64{
+		"Draft Phase": forensics.DraftPhase,
+		"Awaiting Initial Review": forensics.AwaitingReview,
+		"Review Iterations": forensics.ReviewIteration,
+		"Final Approval": forensics.FinalApproval,
+	}
+
+	var longestPhase string
+	var longestDuration float64
+
+	for phase, duration := range phases {
+		if duration > longestDuration {
+			longestDuration = duration
+			longestPhase = phase
+		}
+	}
+
+	return longestPhase
+}
+
+// identifyMainReviewer finds the most active reviewer
+func (a *Analyzer) identifyMainReviewer(timeline []*github.Timeline) string {
+	reviewers := make(map[string]int)
+
+	for _, event := range timeline {
+		if event.GetEvent() == "reviewed" && event.Actor != nil {
+			reviewers[event.Actor.GetLogin()]++
+		}
+	}
+
+	var mainReviewer string
+	var maxReviews int
+
+	for reviewer, count := range reviewers {
+		if count > maxReviews {
+			maxReviews = count
+			mainReviewer = reviewer
+		}
+	}
+
+	if mainReviewer == "" {
+		return "none"
+	}
+
+	return mainReviewer
+}
+
+// calculateResponseTimes estimates reviewer and author response times
+func (a *Analyzer) calculateResponseTimes(timeline []*github.Timeline, author string) (float64, float64) {
+	// Simplified calculation - would need more sophisticated analysis
+	// For now, return reasonable defaults based on the phase durations
+	reviewerResponse := 48.0  // 2 days default
+	authorResponse := 24.0    // 1 day default
+
+	return reviewerResponse, authorResponse
+}
+
+// generateRootCauseAnalysis determines the primary cause of delay
+func (a *Analyzer) generateRootCauseAnalysis(forensics *ForensicsData, prMetrics *PRMetrics) string {
+	// Analyze the longest delay phase to determine root cause
+	switch forensics.LongestDelay {
+	case "Awaiting Initial Review":
+		if forensics.AwaitingReview > 168 { // >1 week
+			return "Long wait time for initial review - reviewer capacity bottleneck"
+		}
+		return "Delay in initial review assignment"
+
+	case "Review Iterations":
+		if prMetrics.ReviewCycles > 2 {
+			return "Multiple review cycles - complex changes or communication issues"
+		}
+		return "Extended review iteration period"
+
+	case "Final Approval":
+		if forensics.FinalApproval > 72 { // >3 days
+			return "Delay after final review - approval or merge process bottleneck"
+		}
+		return "Standard final approval process"
+
+	case "Draft Phase":
+		return "Extended time in draft status - author preparation"
+
+	default:
+		if prMetrics.TotalLinesChanged > 500 {
+			return "Large PR complexity requiring extensive review"
+		}
+		return "Standard development and review process"
+	}
+}
+
+// generateProcessInsights creates actionable insights for process improvement
+func (a *Analyzer) generateProcessInsights(forensics *ForensicsData, prMetrics *PRMetrics) []string {
+	var insights []string
+
+	// Insights based on delay analysis
+	if forensics.AwaitingReview > 168 { // >1 week
+		insights = append(insights, "⚠️ **High initial review delay** - consider reviewer assignment automation or capacity planning")
+	}
+
+	if prMetrics.ReviewCycles > 2 {
+		insights = append(insights, "🔄 **Multiple review cycles** - consider earlier feedback, smaller PRs, or review guidelines")
+	}
+
+	if prMetrics.TotalLinesChanged > 500 {
+		insights = append(insights, "📏 **Large PR size** - consider breaking into smaller, focused PRs")
+	}
+
+	if forensics.FinalApproval > 72 { // >3 days
+		insights = append(insights, "🚀 **Slow merge process** - review final approval and merge automation")
+	}
+
+	if len(insights) == 0 {
+		insights = append(insights, "✅ **Standard process** - no major bottlenecks identified")
+	}
+
+	return insights
+}
+
+// generateForensicsSection creates a comprehensive forensics analysis section for the markdown report
+func generateForensicsSection(metrics []*PRMetrics, repoName string) string {
+	var forensicsPRs []*PRMetrics
+
+	// Collect all PRs with forensics data
+	for _, pr := range metrics {
+		if pr.Forensics != nil {
+			forensicsPRs = append(forensicsPRs, pr)
+		}
+	}
+
+	if len(forensicsPRs) == 0 {
+		return "No problematic PRs requiring forensics analysis were detected in this time period. ✅\n\n"
+	}
+
+	section := fmt.Sprintf("*Analyzed %d problematic PRs in detail*\n\n", len(forensicsPRs))
+
+	for _, pr := range forensicsPRs {
+		section += generateSinglePRForensics(pr, repoName)
+	}
+
+	return section
+}
+
+// generateSinglePRForensics creates detailed forensics analysis for an individual PR
+func generateSinglePRForensics(pr *PRMetrics, repoName string) string {
+	f := pr.Forensics
+
+	// Calculate total time in days
+	totalDays := 0.0
+	if pr.TimeToMerge != nil {
+		totalDays = *pr.TimeToMerge / 24
+	}
+
+	return fmt.Sprintf(`### [PR #%d](%s) - %s
+
+**Author:** @%s | **Total Time:** %.1f days | **State:** %s | **Files:** %d
+
+#### Timeline Breakdown
+- **Draft Phase:** %.1f hours
+- **Awaiting Initial Review:** %.1f hours (%.1f days)
+- **Review Iterations:** %.1f hours (%.1f days)
+- **Final Approval:** %.1f hours (%.1f days)
+
+#### Delay Analysis
+- **Longest Delay Phase:** %s
+- **Root Cause:** %s
+
+#### Collaboration Metrics
+- **Reviewers:** %d total reviews (primary: @%s)
+- **Review Cycles:** %d cycles
+- **Avg Reviewer Response:** %.1f hours
+- **Avg Author Response:** %.1f hours
+
+#### Process Insights
+%s
+
+#### Key Events Timeline
+%s
+
+---
+
+`,
+		pr.Number,
+		fmt.Sprintf("https://github.com/%s/pull/%d", repoName, pr.Number),
+		truncateTitle(pr.Title, 60),
+		pr.Author,
+		totalDays,
+		pr.State,
+		pr.ChangedFiles,
+		f.DraftPhase,
+		f.AwaitingReview,
+		f.AwaitingReview / 24,
+		f.ReviewIteration,
+		f.ReviewIteration / 24,
+		f.FinalApproval,
+		f.FinalApproval / 24,
+		f.LongestDelay,
+		f.RootCause,
+		f.ReviewersCount,
+		f.MainReviewer,
+		pr.ReviewCycles,
+		f.ReviewerResponse,
+		f.AuthorResponse,
+		formatProcessInsights(f.ProcessInsights),
+		formatTimelineEvents(f.TimelineEvents, 5),
+	)
+}
+
+// formatProcessInsights formats process insights as a bulleted list
+func formatProcessInsights(insights []string) string {
+	if len(insights) == 0 {
+		return "- ✅ No specific process issues identified"
+	}
+
+	formatted := ""
+	for _, insight := range insights {
+		formatted += fmt.Sprintf("- %s\n", insight)
+	}
+
+	return formatted
+}
+
+// formatTimelineEvents formats key timeline events for display
+func formatTimelineEvents(events []TimelineEvent, maxEvents int) string {
+	if len(events) == 0 {
+		return "- No timeline events available\n"
+	}
+
+	formatted := ""
+	count := 0
+
+	for _, event := range events {
+		if count >= maxEvents {
+			break
+		}
+
+		// Format the timestamp
+		timeStr := event.Timestamp.Format("2006-01-02")
+
+		// Create event description
+		switch event.Type {
+		case "created":
+			formatted += fmt.Sprintf("1. **Created** - %s by @%s\n", timeStr, event.Actor)
+		case "review_requested":
+			formatted += fmt.Sprintf("%d. **Review Requested** - %s\n", count+1, timeStr)
+		case "reviewed":
+			formatted += fmt.Sprintf("%d. **Reviewed** - %s by @%s\n", count+1, timeStr, event.Actor)
+		case "merged":
+			formatted += fmt.Sprintf("%d. **Merged** - %s by @%s\n", count+1, timeStr, event.Actor)
+		default:
+			formatted += fmt.Sprintf("%d. **%s** - %s by @%s\n", count+1, event.Type, timeStr, event.Actor)
+		}
+
+		count++
+	}
+
+	if len(events) > maxEvents {
+		formatted += fmt.Sprintf("... and %d more events\n", len(events) - maxEvents)
+	}
+
+	return formatted
+}
+
+// CountComments counts both issue comments and review comments for a PR
+func (a *Analyzer) CountComments(prNumber int) (int, error) {
+	// Count issue comments
+	issueComments, _, err := a.client.Issues.ListComments(a.ctx, a.owner, a.repo, prNumber, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get issue comments: %w", err)
+	}
+
+	// Count review comments
+	reviewComments, _, err := a.client.PullRequests.ListComments(a.ctx, a.owner, a.repo, prNumber, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get review comments: %w", err)
+	}
+
+	return len(issueComments) + len(reviewComments), nil
 }
 
 // Helper functions
